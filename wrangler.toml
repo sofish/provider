@@ -9,4 +9,4 @@ cpu_ms = 60000
 [[d1_databases]]
 binding = "DB"
 database_name = "provider-config"
-database_id = "local"
+database_id = "ac2adc9b-50e9-44e5-bd49-ea1cfcbf23f0"
