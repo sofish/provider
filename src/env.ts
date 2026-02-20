@@ -21,4 +21,8 @@ export interface Env {
 
   // Optional: debug mode
   DEBUG?: string;
+
+  // Admin auth secrets
+  ADMIN_PASSWORD?: string;
+  JWT_SECRET?: string;
 }

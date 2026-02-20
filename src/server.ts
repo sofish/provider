@@ -1,20 +1,43 @@
 import { Hono } from 'hono';
 import { stream } from 'hono/streaming';
 import type { AppConfig } from './config.js';
-import type { ProviderType } from './types/provider.js';
+import type { ProviderType, ProviderConfig } from './types/provider.js';
 import { ProviderError } from './types/errors.js';
 import type { ProviderErrorType } from './types/errors.js';
 import { registry, createTransformState } from './converters/index.js';
 import { getAdapter } from './providers/index.js';
 import { validateRequest } from './middleware/index.js';
+import { adminAuth, apiKeyAuth } from './middleware/auth.js';
 import { logger } from './utils/logger.js';
 import { isContextOverflow } from './utils/overflow.js';
 import type { D1Database } from './db/index.js';
-import { upsertProvider, listProviders, getProvider, deleteProvider, ensureSchema } from './db/index.js';
+import {
+  listInstances,
+  getInstance,
+  createInstance,
+  updateInstance,
+  deleteInstance,
+  setCooldown,
+  clearCooldown,
+  ensureSchema,
+} from './db/index.js';
+import { selectInstanceOrSoonest } from './routing/select.js';
+import { createAuthRoutes } from './routes/auth.js';
+import { createApiKeyRoutes } from './routes/api-keys.js';
+import { createAdminPages } from './admin/pages.js';
 
 type HonoEnv = { Variables: { body: Record<string, unknown> } };
 
-export function createApp(config: AppConfig, db?: D1Database) {
+export interface CreateAppOptions {
+  config: AppConfig;
+  db?: D1Database;
+  adminPassword?: string;
+  jwtSecret?: string;
+  waitUntil?: (promise: Promise<unknown>) => void;
+}
+
+export function createApp(options: CreateAppOptions) {
+  const { config, db, adminPassword, jwtSecret, waitUntil } = options;
   const app = new Hono<HonoEnv>();
 
   // Global error handler
@@ -61,34 +84,88 @@ export function createApp(config: AppConfig, db?: D1Database) {
     });
   });
 
-  // --- Admin: Provider config management (requires D1) ---
+  // --- Admin auth routes (no auth required) ---
+  if (adminPassword && jwtSecret) {
+    app.route('/admin', createAuthRoutes(adminPassword, jwtSecret));
+    app.route('/admin', createAdminPages(jwtSecret));
+  }
 
+  // --- Protected admin config routes ---
+  if (jwtSecret) {
+    app.use('/v1/config/*', adminAuth(jwtSecret));
+  }
+
+  // --- Admin: Provider instance management (requires D1) ---
+
+  // List all instances (no api_key in response)
   app.get('/v1/config/providers', async (c) => {
     if (!db) return c.json({ error: 'D1 not available' }, 501);
-    const providers = await listProviders(db);
-    return c.json({ providers });
+    const type = c.req.query('type');
+    const instances = await listInstances(db, type);
+    const safe = instances.map(({ apiKey, ...rest }) => rest);
+    return c.json({ instances: safe });
   });
 
-  app.get('/v1/config/providers/:type', async (c) => {
+  // Create instance
+  app.post('/v1/config/providers', async (c) => {
     if (!db) return c.json({ error: 'D1 not available' }, 501);
-    const type = c.req.param('type');
-    const provider = await getProvider(db, type);
-    if (!provider) return c.json({ error: `Provider not found: ${type}` }, 404);
-    return c.json({ provider });
-  });
-
-  app.put('/v1/config/providers/:type', async (c) => {
-    if (!db) return c.json({ error: 'D1 not available' }, 501);
-    const type = c.req.param('type');
     const body = await c.req.json();
-    await upsertProvider(db, type, body.api_key, body.base_url, body.enabled);
+    const instance = await createInstance(db, {
+      type: body.type,
+      name: body.name,
+      apiKey: body.api_key,
+      baseUrl: body.base_url,
+      weight: body.weight,
+      cooldownSeconds: body.cooldown_seconds,
+    });
+    const { apiKey, ...safe } = instance;
+    return c.json({ instance: safe }, 201);
+  });
+
+  // Get instance
+  app.get('/v1/config/providers/:id', async (c) => {
+    if (!db) return c.json({ error: 'D1 not available' }, 501);
+    const id = c.req.param('id');
+    const instance = await getInstance(db, id);
+    if (!instance) return c.json({ error: `Instance not found: ${id}` }, 404);
+    const { apiKey, ...safe } = instance;
+    return c.json({ instance: safe });
+  });
+
+  // Update instance
+  app.put('/v1/config/providers/:id', async (c) => {
+    if (!db) return c.json({ error: 'D1 not available' }, 501);
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    await updateInstance(db, id, {
+      name: body.name,
+      apiKey: body.api_key,
+      baseUrl: body.base_url,
+      weight: body.weight,
+      enabled: body.enabled,
+      cooldownSeconds: body.cooldown_seconds,
+    });
     return c.json({ ok: true });
   });
 
-  app.delete('/v1/config/providers/:type', async (c) => {
+  // Delete instance
+  app.delete('/v1/config/providers/:id', async (c) => {
     if (!db) return c.json({ error: 'D1 not available' }, 501);
-    const type = c.req.param('type');
-    await deleteProvider(db, type);
+    const id = c.req.param('id');
+    await deleteInstance(db, id);
+    return c.json({ ok: true });
+  });
+
+  // Cooldown management
+  app.post('/v1/config/providers/:id/cooldown', async (c) => {
+    if (!db) return c.json({ error: 'D1 not available' }, 501);
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    if (body.clear) {
+      await clearCooldown(db, id);
+    } else {
+      await setCooldown(db, id, body.seconds || 60);
+    }
     return c.json({ ok: true });
   });
 
@@ -98,7 +175,15 @@ export function createApp(config: AppConfig, db?: D1Database) {
     return c.json({ ok: true });
   });
 
+  // --- API key management routes (protected by adminAuth via /v1/config/* above) ---
+  if (db) {
+    app.route('/v1/config/api-keys', createApiKeyRoutes(db));
+  }
+
   // --- Main chat completions endpoint ---
+  if (db) {
+    app.use('/v1/chat/completions', apiKeyAuth(db));
+  }
 
   app.post('/v1/chat/completions', validateRequest, async (c) => {
     const body = c.get('body') as Record<string, unknown>;
@@ -106,15 +191,34 @@ export function createApp(config: AppConfig, db?: D1Database) {
     const model = body.model as string;
     const isStream = body.stream === true;
 
-    // Validate API key
-    const providerConfig = config.providers[providerType];
-    if (!providerConfig.apiKey) {
+    // Select instance via weighted routing
+    const candidates = config.instances.filter(
+      (inst) => inst.type === providerType && inst.enabled,
+    );
+
+    const selected = selectInstanceOrSoonest(candidates, new Date());
+
+    if (!selected) {
+      throw new ProviderError(
+        `No available instances for provider: ${providerType}. Configure via /v1/config/providers.`,
+        503,
+        providerType,
+      );
+    }
+
+    if (!selected.apiKey) {
       throw new ProviderError(
         `No API key configured for provider: ${providerType}. Set ${providerType.toUpperCase()}_API_KEY env var or configure via /v1/config/providers.`,
         401,
         providerType,
       );
     }
+
+    // Build ProviderConfig from selected instance
+    const providerConfig: ProviderConfig = {
+      apiKey: selected.apiKey,
+      baseUrl: selected.baseUrl,
+    };
 
     // Get adapter
     const adapter = getAdapter(providerType, providerConfig);
@@ -130,14 +234,25 @@ export function createApp(config: AppConfig, db?: D1Database) {
       requestBody = registry.transformRequest('openai', providerType, body, model, isStream);
     }
 
-    logger.debug(`→ ${providerType}/${model}`, isStream ? '(stream)' : '(sync)');
+    logger.debug(`→ ${providerType}/${model} [${selected.id}:${selected.name}]`, isStream ? '(stream)' : '(sync)');
 
     // Execute upstream request
     const upstreamResponse = await adapter.execute(requestBody, model, { stream: isStream });
 
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text();
-      logger.error(`Upstream error (${providerType}):`, upstreamResponse.status, errorText);
+      logger.error(`Upstream error (${providerType}/${selected.id}):`, upstreamResponse.status, errorText);
+
+      // Set cooldown on 429 or 5xx
+      if (db && (upstreamResponse.status === 429 || upstreamResponse.status >= 500)) {
+        const cooldownPromise = setCooldown(db, selected.id, selected.cooldownSeconds);
+        if (waitUntil) {
+          waitUntil(cooldownPromise);
+        } else {
+          await cooldownPromise;
+        }
+      }
+
       const overflow = isContextOverflow(errorText);
       throw new ProviderError(
         `Upstream ${providerType} error: ${errorText}`,
