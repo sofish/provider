@@ -48,6 +48,8 @@ export function apiKeyAuth(db: D1Database) {
       return c.json({ error: 'Invalid API key' }, 401);
     }
 
+    c.set('apiKeyId', row.id);
+
     // Update last_used async (best-effort)
     const ctx = c.executionCtx as { waitUntil?: (p: Promise<unknown>) => void };
     if (ctx?.waitUntil) {

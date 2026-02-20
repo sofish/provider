@@ -24,9 +24,12 @@ import {
 import { selectInstanceOrSoonest } from './routing/select.js';
 import { createAuthRoutes } from './routes/auth.js';
 import { createApiKeyRoutes } from './routes/api-keys.js';
+import { createLogRoutes } from './routes/logs.js';
 import { createAdminPages } from './admin/pages.js';
+import { logRequest } from './db/request-logs.js';
+import { calculateCost } from './pricing.js';
 
-type HonoEnv = { Variables: { body: Record<string, unknown> } };
+type HonoEnv = { Variables: { body: Record<string, unknown>; apiKeyId?: string } };
 
 export interface CreateAppOptions {
   config: AppConfig;
@@ -178,6 +181,7 @@ export function createApp(options: CreateAppOptions) {
   // --- API key management routes (protected by adminAuth via /v1/config/* above) ---
   if (db) {
     app.route('/v1/config/api-keys', createApiKeyRoutes(db));
+    app.route('/v1/config/logs', createLogRoutes(db));
   }
 
   // --- Main chat completions endpoint ---
@@ -186,10 +190,12 @@ export function createApp(options: CreateAppOptions) {
   }
 
   app.post('/v1/chat/completions', validateRequest, async (c) => {
+    const startTime = Date.now();
     const body = c.get('body') as Record<string, unknown>;
     const providerType = body.type as ProviderType;
     const model = body.model as string;
     const isStream = body.stream === true;
+    const apiKeyId = c.get('apiKeyId');
 
     // Select instance via weighted routing
     const candidates = config.instances.filter(
@@ -229,6 +235,10 @@ export function createApp(options: CreateAppOptions) {
       // Passthrough — strip the `type` field
       const { type, ...rest } = body;
       requestBody = rest;
+      // For OpenAI streaming, inject stream_options to get usage in final chunk
+      if (isStream) {
+        requestBody.stream_options = { include_usage: true };
+      }
     } else {
       // Convert from OpenAI format to provider format
       requestBody = registry.transformRequest('openai', providerType, body, model, isStream);
@@ -263,31 +273,57 @@ export function createApp(options: CreateAppOptions) {
       );
     }
 
+    const logCtx = { startTime, model, instanceId: selected.id, apiKeyId, db, waitUntil };
+
     // Handle streaming response
     if (isStream) {
-      return handleStreamResponse(c, upstreamResponse, providerType, body);
+      return handleStreamResponse(c, upstreamResponse, providerType, body, logCtx);
     }
 
     // Handle non-streaming response
-    return handleSyncResponse(c, upstreamResponse, providerType);
+    return handleSyncResponse(c, upstreamResponse, providerType, logCtx);
   });
 
   return app;
+}
+
+interface LogCtx {
+  startTime: number;
+  model: string;
+  instanceId: string;
+  apiKeyId?: string;
+  db?: D1Database;
+  waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 async function handleSyncResponse(
   c: any,
   upstreamResponse: Response,
   providerType: ProviderType,
+  ctx: LogCtx,
 ) {
   const responseBody = await upstreamResponse.json();
+  const result = providerType === 'openai'
+    ? responseBody
+    : registry.transformResponse(providerType, 'openai', responseBody as Record<string, unknown>);
 
-  if (providerType === 'openai') {
-    return c.json(responseBody);
+  // Extract usage and log
+  const usage = (result as any).usage || {};
+  const promptTokens = usage.prompt_tokens || 0;
+  const completionTokens = usage.completion_tokens || 0;
+  const durationMs = Date.now() - ctx.startTime;
+  const cost = calculateCost(providerType, ctx.model, promptTokens, completionTokens);
+
+  if (ctx.db && ctx.waitUntil) {
+    ctx.waitUntil(logRequest(ctx.db, {
+      provider: providerType, model: ctx.model, instanceId: ctx.instanceId,
+      apiKeyId: ctx.apiKeyId, promptTokens, completionTokens,
+      totalTokens: promptTokens + completionTokens, cost,
+      durationMs, status: 200, stream: false,
+    }));
   }
 
-  const converted = registry.transformResponse(providerType, 'openai', responseBody as Record<string, unknown>);
-  return c.json(converted);
+  return c.json(result);
 }
 
 async function handleStreamResponse(
@@ -295,28 +331,59 @@ async function handleStreamResponse(
   upstreamResponse: Response,
   providerType: ProviderType,
   originalBody: Record<string, unknown>,
+  ctx: LogCtx,
 ) {
   c.header('Content-Type', 'text/event-stream');
   c.header('Cache-Control', 'no-cache');
   c.header('Connection', 'keep-alive');
 
   if (providerType === 'openai') {
-    // Passthrough streaming
+    // Passthrough streaming — parse usage from final chunk
     const reader = upstreamResponse.body?.getReader();
     if (!reader) {
       throw new ProviderError('No response body from upstream', 502, providerType);
     }
 
+    let promptTokens = 0;
+    let completionTokens = 0;
+
     return stream(c, async (s) => {
       const decoder = new TextDecoder();
+      let sseBuffer = '';
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          await s.write(decoder.decode(value, { stream: true }));
+          const text = decoder.decode(value, { stream: true });
+          await s.write(text);
+
+          // Parse SSE lines for usage data
+          sseBuffer += text;
+          const sseLines = sseBuffer.split('\n');
+          sseBuffer = sseLines.pop() || '';
+          for (const line of sseLines) {
+            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.usage) {
+                  promptTokens = data.usage.prompt_tokens || 0;
+                  completionTokens = data.usage.completion_tokens || 0;
+                }
+              } catch { /* ignore parse errors */ }
+            }
+          }
         }
       } finally {
         reader.releaseLock();
+        if (ctx.db && ctx.waitUntil) {
+          const cost = calculateCost(providerType, ctx.model, promptTokens, completionTokens);
+          ctx.waitUntil(logRequest(ctx.db, {
+            provider: providerType, model: ctx.model, instanceId: ctx.instanceId,
+            apiKeyId: ctx.apiKeyId, promptTokens, completionTokens,
+            totalTokens: promptTokens + completionTokens, cost,
+            durationMs: Date.now() - ctx.startTime, status: 200, stream: true,
+          }));
+        }
       }
     });
   }
@@ -372,6 +439,17 @@ async function handleStreamResponse(
       }
     } finally {
       reader.releaseLock();
+      // Log usage from accumulated state
+      if (ctx.db && ctx.waitUntil) {
+        const { promptTokens, completionTokens, totalTokens } = state.usage;
+        const cost = calculateCost(providerType, ctx.model, promptTokens, completionTokens);
+        ctx.waitUntil(logRequest(ctx.db, {
+          provider: providerType, model: ctx.model, instanceId: ctx.instanceId,
+          apiKeyId: ctx.apiKeyId, promptTokens, completionTokens,
+          totalTokens, cost, durationMs: Date.now() - ctx.startTime,
+          status: 200, stream: true,
+        }));
+      }
     }
   });
 }

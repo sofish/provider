@@ -165,6 +165,53 @@ td{color:#d4d4d4}
   </section>
 
   <section>
+    <h2>Usage Summary</h2>
+    <div class="create-form" style="margin-bottom:12px">
+      <div class="row">
+        <select id="summaryDays" onchange="loadSummary()">
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="">All time</option>
+        </select>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>Provider</th><th>Model</th><th>Requests</th><th>Prompt Tokens</th><th>Completion Tokens</th><th>Total Tokens</th><th>Cost</th></tr></thead>
+      <tbody id="usageSummary"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Request Logs</h2>
+    <div class="create-form" style="margin-bottom:12px">
+      <div class="row">
+        <select id="logProvider" onchange="loadLogs()">
+          <option value="">All providers</option>
+          <option value="openai">openai</option>
+          <option value="anthropic">anthropic</option>
+          <option value="gemini">gemini</option>
+          <option value="codex">codex</option>
+        </select>
+        <input class="flex" type="text" id="logModel" placeholder="Filter by model..." oninput="debouncedLoadLogs()">
+        <input type="date" id="logStart" onchange="loadLogs()" style="padding:8px 12px;background:#0a0a0a;border:1px solid #262626;border-radius:6px;color:#e5e5e5;font-size:13px">
+        <input type="date" id="logEnd" onchange="loadLogs()" style="padding:8px 12px;background:#0a0a0a;border:1px solid #262626;border-radius:6px;color:#e5e5e5;font-size:13px">
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Tokens (P/C/T)</th><th>Cost</th><th>Duration</th><th>Stream</th><th>Status</th></tr></thead>
+      <tbody id="requestLogs"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
+    </table>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+      <span id="logPagination" style="color:#737373;font-size:13px"></span>
+      <div>
+        <button class="logout" id="logPrev" onclick="logsPage(-1)" style="margin-right:4px" disabled>&larr; Prev</button>
+        <button class="logout" id="logNext" onclick="logsPage(1)">Next &rarr;</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
     <h2>API Keys</h2>
     <div class="create-form">
       <div class="row">
@@ -319,8 +366,87 @@ async function logout(){
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 
+let logOffset=0;const logLimit=20;let logTotal=0;
+
+async function loadSummary(){
+  const days=document.getElementById('summaryDays').value;
+  const q=days?'?days='+days:'';
+  const res=await api('/v1/config/logs/summary'+q);
+  if(res.status===401){window.location.href='/admin';return}
+  const{summary}=await res.json();
+  const tb=document.getElementById('usageSummary');
+  if(!summary||!summary.length){tb.innerHTML='<tr><td colspan="7" class="empty">No usage data yet</td></tr>';return}
+  tb.innerHTML=summary.map(r=>'<tr>'
+    +'<td><strong>'+esc(r.provider)+'</strong></td>'
+    +'<td>'+esc(r.model)+'</td>'
+    +'<td class="mono">'+num(r.requests)+'</td>'
+    +'<td class="mono">'+num(r.prompt_tokens)+'</td>'
+    +'<td class="mono">'+num(r.completion_tokens)+'</td>'
+    +'<td class="mono">'+num(r.total_tokens)+'</td>'
+    +'<td class="mono">$'+cost(r.cost)+'</td>'
+    +'</tr>').join('');
+}
+
+async function loadLogs(){
+  const provider=document.getElementById('logProvider').value;
+  const model=document.getElementById('logModel').value.trim();
+  const startDate=document.getElementById('logStart').value;
+  const endDate=document.getElementById('logEnd').value;
+  const params=new URLSearchParams();
+  params.set('limit',logLimit);
+  params.set('offset',logOffset);
+  if(provider)params.set('provider',provider);
+  if(model)params.set('model',model);
+  if(startDate)params.set('start_date',startDate);
+  if(endDate)params.set('end_date',endDate);
+  const res=await api('/v1/config/logs?'+params);
+  if(res.status===401){window.location.href='/admin';return}
+  const data=await res.json();
+  logTotal=data.total;
+  const tb=document.getElementById('requestLogs');
+  const logs=data.logs;
+  if(!logs||!logs.length){tb.innerHTML='<tr><td colspan="8" class="empty">No request logs</td></tr>';updateLogPagination();return}
+  tb.innerHTML=logs.map(l=>{
+    const t=l.created_at?new Date(l.created_at+'Z').toLocaleString():'—';
+    const statusCls=l.status>=400?'color:#f87171':l.status>=300?'color:#fbbf24':'color:#34d399';
+    return '<tr>'
+      +'<td style="white-space:nowrap">'+t+'</td>'
+      +'<td><strong>'+esc(l.provider)+'</strong></td>'
+      +'<td>'+esc(l.model)+'</td>'
+      +'<td class="mono">'+num(l.prompt_tokens)+' / '+num(l.completion_tokens)+' / '+num(l.total_tokens)+'</td>'
+      +'<td class="mono">$'+cost(l.cost)+'</td>'
+      +'<td class="mono">'+l.duration_ms+'ms</td>'
+      +'<td>'+(l.stream?'Yes':'No')+'</td>'
+      +'<td style="'+statusCls+'">'+l.status+'</td>'
+      +'</tr>'
+  }).join('');
+  updateLogPagination();
+}
+
+function updateLogPagination(){
+  const pg=document.getElementById('logPagination');
+  const from=logTotal>0?logOffset+1:0;
+  const to=Math.min(logOffset+logLimit,logTotal);
+  pg.textContent=from+'-'+to+' of '+logTotal;
+  document.getElementById('logPrev').disabled=logOffset===0;
+  document.getElementById('logNext').disabled=logOffset+logLimit>=logTotal;
+}
+
+function logsPage(dir){
+  logOffset=Math.max(0,logOffset+dir*logLimit);
+  loadLogs();
+}
+
+let _logTimer;
+function debouncedLoadLogs(){clearTimeout(_logTimer);_logTimer=setTimeout(()=>{logOffset=0;loadLogs()},300)}
+
+function num(n){return n!=null?Number(n).toLocaleString():'0'}
+function cost(n){return n!=null?Number(n).toFixed(6):'0.000000'}
+
 loadInstances();
 loadKeys();
+loadSummary();
+loadLogs();
 </script>
 </body>
 </html>`;
