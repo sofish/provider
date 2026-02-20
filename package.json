@@ -1,0 +1,28 @@
+{
+  "name": "provider",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev:worker": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "d1:create": "wrangler d1 create provider-config",
+    "d1:init": "wrangler d1 execute provider-config --file=src/db/schema.sql",
+    "d1:init:local": "wrangler d1 execute provider-config --local --file=src/db/schema.sql"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^3.99.0"
+  }
+}
