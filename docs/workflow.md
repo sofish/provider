@@ -64,6 +64,8 @@ Client Response (OpenAI format)
 | PUT    | /v1/config/providers/:type    | Create/update a provider config |
 | DELETE | /v1/config/providers/:type    | Delete a provider config        |
 | POST   | /v1/config/init               | Initialize D1 schema            |
+| GET    | /v1/config/logs               | Paginated request logs          |
+| GET    | /v1/config/logs/summary       | Aggregated usage summary        |
 
 ## Request Format
 
@@ -125,6 +127,48 @@ Detects 15+ provider-specific error patterns indicating context overflow:
 - Bedrock, Grok, Groq, OpenRouter, and generic patterns
 
 When detected, the error response uses `type: "context_overflow"` instead of generic `provider_error`.
+
+## Request Logging & Cost Tracking
+
+Every `/v1/chat/completions` request is logged to D1 via `waitUntil` (fire-and-forget, zero latency impact). Each log entry records:
+
+- **Provider & model** — which provider instance handled the request
+- **Token counts** — prompt, completion, and total tokens
+- **Cost** — calculated from a built-in pricing table (`src/pricing.ts`)
+- **Duration** — end-to-end response time in milliseconds
+- **Stream flag** — whether the request used streaming
+
+### Admin Dashboard
+
+The admin dashboard (`/admin/dashboard`) includes:
+- **Usage Summary** — aggregated request counts, token totals, and cost per provider/model, filterable by time range (7/30/90 days or all time)
+- **Request Logs** — individual request entries with pagination and filters (provider, model, date range)
+
+### API Endpoints
+
+**`GET /v1/config/logs`** — Paginated request logs.
+
+Query params: `limit`, `offset`, `provider`, `model`, `start_date`, `end_date`.
+
+```json
+{ "logs": [...], "total": 142 }
+```
+
+**`GET /v1/config/logs/summary`** — Aggregated usage by provider/model.
+
+Query params: `days` (e.g. `?days=7`).
+
+```json
+{
+  "summary": [
+    { "provider": "anthropic", "model": "claude-sonnet-4-20250514", "requests": 85, "prompt_tokens": 120000, "completion_tokens": 45000, "total_tokens": 165000, "cost": 1.035 }
+  ]
+}
+```
+
+### Pricing
+
+Built-in pricing covers OpenAI (gpt-4o, gpt-4.1, o1, o3, o4-mini, etc.), Anthropic (claude-sonnet-4, claude-opus-4, claude-haiku-3.5), Gemini (2.5-pro, 2.5-flash, 2.0-flash), and Codex (codex-mini). Unknown models log with cost = 0. Update `src/pricing.ts` to add new models.
 
 ## Provider-Specific Details
 
@@ -230,9 +274,12 @@ src/
 ├── index.ts                  # Node.js entry point (tsx)
 ├── worker.ts                 # Cloudflare Workers entry point
 ├── server.ts                 # Hono app, routing, admin API, error handling
+├── pricing.ts                # Per-model token pricing table
 ├── db/
 │   ├── index.ts              # D1 helpers (CRUD, caching)
-│   └── schema.sql            # D1 schema
+│   ├── schema.sql            # D1 schema
+│   ├── api-keys.ts           # API key management
+│   └── request-logs.ts       # Request log insert & queries
 ├── converters/
 │   ├── index.ts              # Converter registration
 │   ├── registry.ts           # ConverterRegistry
@@ -249,7 +296,14 @@ src/
 ├── providers/                # Upstream provider adapters
 │   ├── base.ts, anthropic.ts, gemini.ts, openai.ts, codex.ts
 │   └── index.ts
+├── routes/
+│   ├── api-keys.ts           # API key admin routes
+│   ├── auth.ts               # Auth login/logout routes
+│   └── logs.ts               # Request log & usage summary routes
+├── admin/
+│   └── pages.ts              # Admin dashboard HTML pages
 ├── middleware/
+│   ├── auth.ts               # Admin JWT & API key auth
 │   ├── validate.ts           # Request validation
 │   └── error-handler.ts
 └── utils/
