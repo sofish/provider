@@ -1,7 +1,27 @@
 {
   "name": "provider",
   "version": "0.1.0",
-  "private": true,
+  "description": "Unified AI API proxy gateway on Cloudflare Workers — route OpenAI-format requests to OpenAI, Anthropic, Gemini, and Codex",
+  "license": "MIT",
+  "author": "sofish",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sofish/provider.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sofish/provider/issues"
+  },
+  "homepage": "https://github.com/sofish/provider#readme",
+  "keywords": [
+    "ai",
+    "api-gateway",
+    "proxy",
+    "openai",
+    "anthropic",
+    "gemini",
+    "cloudflare-workers",
+    "llm"
+  ],
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",

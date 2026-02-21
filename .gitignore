@@ -2,5 +2,7 @@ node_modules/
 dist/
 .env
 *.log
+*.tsbuildinfo
 .wrangler/
 .dev.vars
+.DS_Store

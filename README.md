@@ -1,5 +1,7 @@
 # Provider
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Unified AI API proxy gateway that runs on Cloudflare Workers. Send requests in OpenAI chat completions format with a `type` field, and Provider routes them to the right upstream (OpenAI, Anthropic, Gemini, Codex), converting formats both ways.
 
 ## Quick Start
@@ -16,6 +18,10 @@ npm run d1:init
 # Set provider API keys as secrets
 wrangler secret put ANTHROPIC_API_KEY
 wrangler secret put GEMINI_API_KEY
+
+# Set admin secrets
+wrangler secret put ADMIN_PASSWORD
+wrangler secret put JWT_SECRET
 
 # Local dev
 npm run dev:worker
@@ -78,6 +84,16 @@ curl -X PUT https://your-worker.workers.dev/v1/config/providers/anthropic \
 curl https://your-worker.workers.dev/v1/config/providers
 ```
 
+## Admin Dashboard
+
+Provider includes a built-in admin dashboard for monitoring usage. Log in at `/admin` with your `ADMIN_PASSWORD` to:
+
+- View per-model and per-provider usage tracking
+- Browse request logs with token counts and costs
+- Monitor error rates and response times
+
+Set `ADMIN_PASSWORD` and `JWT_SECRET` as Wrangler secrets (or environment variables for local dev) to enable the dashboard.
+
 ## Configuration
 
 | Variable | Description |
@@ -86,6 +102,8 @@ curl https://your-worker.workers.dev/v1/config/providers
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `GEMINI_API_KEY` | Google Gemini API key |
 | `CODEX_API_KEY` | Codex API key |
+| `ADMIN_PASSWORD` | Password for admin dashboard login |
+| `JWT_SECRET` | Secret for signing admin session tokens |
 | `*_BASE_URL` | Custom base URL per provider |
 | `PORT` | Server port (Node.js only, default: 3000) |
 
@@ -106,3 +124,7 @@ npm run typecheck     # Type check
 ## Architecture
 
 See [docs/workflow.md](docs/workflow.md) for the full request/response flow, provider-specific details, and project structure.
+
+## License
+
+[MIT](LICENSE)
