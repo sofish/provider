@@ -67,6 +67,6 @@ export default {
       jwtSecret: env.JWT_SECRET,
       waitUntil: ctx.waitUntil.bind(ctx),
     });
-    return app.fetch(request);
+    return app.fetch(request, env, ctx as unknown as import('hono').ExecutionContext);
   },
 };
