@@ -245,69 +245,37 @@ export async function clearCooldown(db: D1Database, id: string): Promise<void> {
  * Includes migration from old `providers` table to `provider_instances`.
  */
 export async function ensureSchema(db: D1Database): Promise<void> {
-  // Check if old `providers` table exists
+  // Create provider_instances table (idempotent)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_instances (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      name TEXT NOT NULL DEFAULT '',
+      api_key TEXT NOT NULL DEFAULT '',
+      base_url TEXT NOT NULL DEFAULT '',
+      weight INTEGER NOT NULL DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      cooldown_until TEXT,
+      cooldown_seconds INTEGER NOT NULL DEFAULT 60,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // Migrate old `providers` table if it exists
   const oldTable = await db.prepare(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='providers'"
   ).first<{ name: string }>();
 
   if (oldTable) {
-    // Migrate old providers → provider_instances
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS provider_instances (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        name TEXT NOT NULL DEFAULT '',
-        api_key TEXT NOT NULL DEFAULT '',
-        base_url TEXT NOT NULL DEFAULT '',
-        weight INTEGER NOT NULL DEFAULT 1,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        cooldown_until TEXT,
-        cooldown_seconds INTEGER NOT NULL DEFAULT 60,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-    `);
-
-    // Check if provider_instances already has data (in case migration ran partially)
     const existingCount = await db.prepare('SELECT COUNT(*) as cnt FROM provider_instances').first<{ cnt: number }>();
     if (!existingCount || existingCount.cnt === 0) {
-      // Migrate rows from old table
-      await db.exec(`
-        INSERT INTO provider_instances (id, type, name, api_key, base_url, weight, enabled, cooldown_seconds, created_at, updated_at)
-        SELECT
-          type,
-          type,
-          type,
-          api_key,
-          base_url,
-          1,
-          enabled,
-          60,
-          created_at,
-          updated_at
-        FROM providers;
-      `);
+      await db.prepare(
+        `INSERT INTO provider_instances (id, type, name, api_key, base_url, weight, enabled, cooldown_seconds, created_at, updated_at)
+         SELECT type, type, type, api_key, base_url, 1, enabled, 60, created_at, updated_at FROM providers`
+      ).run();
     }
-
-    // Rename old table as backup
     await db.exec('ALTER TABLE providers RENAME TO providers_backup_v1;');
-  } else {
-    // Fresh install — create provider_instances
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS provider_instances (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        name TEXT NOT NULL DEFAULT '',
-        api_key TEXT NOT NULL DEFAULT '',
-        base_url TEXT NOT NULL DEFAULT '',
-        weight INTEGER NOT NULL DEFAULT 1,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        cooldown_until TEXT,
-        cooldown_seconds INTEGER NOT NULL DEFAULT 60,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-    `);
   }
 
   await db.exec('CREATE INDEX IF NOT EXISTS idx_pi_type_enabled ON provider_instances (type, enabled);');
