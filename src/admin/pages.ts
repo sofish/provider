@@ -443,10 +443,13 @@ function debouncedLoadLogs(){clearTimeout(_logTimer);_logTimer=setTimeout(()=>{l
 function num(n){return n!=null?Number(n).toLocaleString():'0'}
 function cost(n){return n!=null?Number(n).toFixed(6):'0.000000'}
 
-loadInstances();
-loadKeys();
-loadSummary();
-loadLogs();
+// Ensure D1 schema exists before loading data
+api('/v1/config/init',{method:'POST'}).then(()=>{
+  loadInstances();
+  loadKeys();
+  loadSummary();
+  loadLogs();
+});
 </script>
 </body>
 </html>`;
